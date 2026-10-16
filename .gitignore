@@ -4,3 +4,15 @@ __pycache__/
 events.jsonl
 *.log
 HANDOFF.md
+HANDOFF-GITHUB.md
+
+# NVIDIA proprietary artifacts (NEVER commit)
+shim/
+**/MessageBus.dll
+
+# plugin build intermediates
+obs-plugin/src/*.obj
+obs-plugin/src/*.lib
+obs-plugin/src/*.exp
+obs-plugin/src/_*.c
+obs-plugin/_*.py
