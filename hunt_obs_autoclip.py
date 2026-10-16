@@ -374,21 +374,19 @@ class ObsClient:
         import obsws_python
         from obsws_python import Subs
 
-        class _Listener:
-            def __init__(self, client: ObsClient, cb):
-                self.client, self.cb = client, cb
-
-            def on_replay_buffer_saved(self, data):
-                path = getattr(data, "savedReplayPath", "") or ""
-                log.info("OBS saved replay: %s", path)
-                self.cb(path)
+        # obsws-python matches callbacks by function __name__ ("on_" + snake_case
+        # event), so it must be a plain named function, not a bound method.
+        def on_replay_buffer_saved(data):
+            path = getattr(data, "savedReplayPath", "") or ""
+            log.info("OBS saved replay: %s", path)
+            out_cb(path)
 
         def _runner():
             while True:
                 try:
                     ev = obsws_python.EventClient(subs=Subs.OUTPUTS, **self._conn_kwargs())
                     log.info("event listener connected to obs-websocket")
-                    ev.callback.register(_Listener(self, out_cb))
+                    ev.callback.register(on_replay_buffer_saved)
                     ev.base_client.ws.settimeout(None)
                     # EventClient.subscribe already spawned its worker; block forever
                     import threading
