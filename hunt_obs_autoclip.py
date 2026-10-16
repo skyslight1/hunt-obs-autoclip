@@ -349,86 +349,56 @@ class ClipPlanner:
 # OBS side: obs-websocket v5 SaveReplayBuffer
 
 class ObsClient:
+    """obs-websocket v5 via obsws-python (ReqClient for calls, EventClient for events)."""
+
     def __init__(self, host: str, port: int, password: str):
         self.host, self.port, self.password = host, port, password
-        self._client = None
 
-    def _connect(self):
-        import simpleobsws  # imported lazily so protocol tests run without it
-        client = simpleobsws.WebSocketClient(
-            url=f"ws://{self.host}:{self.port}",
-            password=self.password or None,
-            identification_method=simpleobsws.IdentificationParameters(
-                rpcVersion=1, eventSubscriptions=int(1 << 9),  # Outputs: ReplayBufferSaved
-            ),
-        )
-        loop_ok = client.connect()
-        if not loop_ok:
-            raise ConnectionError("obs-websocket connect failed")
-        log.info("connected to obs-websocket %s:%d", self.host, self.port)
-        self._client = client
-        return client
+    def _conn_kwargs(self) -> dict:
+        return {"host": self.host, "port": self.port, "password": self.password or ""}
 
-    def save_replay_buffer(self) -> str | None:
-        import asyncio
-        client = self._client
-
-        async def _run():
-            if not client or not await client.wait_until_authenticated():
-                return None
-            result = await client.call("SaveReplayBuffer")
-            if not result or not result.ok():
-                log.error("SaveReplayBuffer failed: %s", result)
-                return None
-            return True
-
+    def save_replay_buffer(self) -> bool:
+        """One-shot save call; a fresh ReqClient per call keeps reconnect logic trivial."""
+        import obsws_python
         try:
-            asyncio.run(_run())
-        except Exception as exc:  # OBS closed / websocket dropped
-            log.warning("obs connection lost (%s); will reconnect next event", exc)
-            self._client = None
-            return None
-        return "ok"
+            req = obsws_python.ReqClient(timeout=5, **self._conn_kwargs())
+            req.save_replay_buffer()
+            req.disconnect()
+            return True
+        except Exception as exc:  # OBS closed / wrong password / no replay buffer
+            log.warning("SaveReplayBuffer failed (%s); will retry next event", exc)
+            return False
 
     def listen_saved_paths(self, out_cb):
-        """Blocking: reconnect loop, prints ReplayBufferSaved payload paths."""
-        import asyncio
-        import simpleobsws
+        """Background thread: EventClient loop printing ReplayBufferSaved paths."""
+        import obsws_python
+        from obsws_python import Subs
 
-        async def _on_saved(data):
-            path = data.get("savedReplayPath", "")
-            log.info("OBS saved replay: %s", path)
-            out_cb(path)
+        class _Listener:
+            def __init__(self, client: ObsClient, cb):
+                self.client, self.cb = client, cb
 
-        async def _runner():
+            def on_replay_buffer_saved(self, data):
+                path = getattr(data, "savedReplayPath", "") or ""
+                log.info("OBS saved replay: %s", path)
+                self.cb(path)
+
+        def _runner():
             while True:
-                client = None
                 try:
-                    client = simpleobsws.WebSocketClient(
-                        url=f"ws://{self.host}:{self.port}",
-                        password=self.password or None,
-                        identification_method=simpleobsws.IdentificationParameters(
-                            rpcVersion=1, eventSubscriptions=int(1 << 9),
-                        ),
-                    )
-                    await client.connect()
-                    if not await client.wait_until_authenticated():
-                        raise ConnectionError("auth failed")
+                    ev = obsws_python.EventClient(subs=Subs.OUTPUTS, **self._conn_kwargs())
                     log.info("event listener connected to obs-websocket")
-                    client.register_event_callback(_on_saved, "ReplayBufferSaved")
+                    ev.callback.register(_Listener(self, out_cb))
+                    ev.base_client.ws.settimeout(None)
+                    # EventClient.subscribe already spawned its worker; block forever
+                    import threading
                     while True:
-                        await asyncio.sleep(3600)
+                        threading.Event().wait(3600)
                 except Exception as exc:
                     log.warning("event listener disconnected (%s); retrying in 5s", exc)
-                    await asyncio.sleep(5)
-                finally:
-                    if client:
-                        try:
-                            await client.disconnect()
-                        except Exception:
-                            pass
+                    time.sleep(5)
 
-        threading.Thread(target=lambda: asyncio.run(_runner()), daemon=True).start()
+        threading.Thread(target=_runner, daemon=True).start()
 
 
 # --------------------------------------------------------------------------
@@ -556,8 +526,11 @@ def main(argv=None) -> int:
     else:
         obs = ObsClient(args.obs_host, args.obs_port, args.obs_password)
         obs.listen_saved_paths(lambda path: log.info("clip ready: %s", path))
-        # eager first connect so the first kill isn't delayed by handshake
-        obs.save_replay_buffer()
+        # probe OBS once at startup so a wrong port/password is visible immediately;
+        # failure is not fatal — every save attempt reconnects anyway
+        if not obs.save_replay_buffer():
+            log.warning("OBS probe failed at startup; check obs-websocket host/port/password "
+                        "and that the Replay Buffer is enabled. Retries continue on each event.")
 
     def obs_worker():
         while True:
