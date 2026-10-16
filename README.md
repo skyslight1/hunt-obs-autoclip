@@ -17,7 +17,46 @@
 
 注意：多款 Highlights 游戏同时装也没问题——管道按连接区分，`Session` 每连接一个，`--events` 可以填多个游戏的事件 ID 并集。
 
-## 前提
+## OBS 原生插件版（推荐，`obs-plugin/`）
+
+除了下文的 Python 独立脚本版外，仓库还提供**单 DLL 原生 OBS 插件**（`obs-plugin/src/hunt-obs-autoclip.dll`，零第三方依赖，随 OBS 自动启停，**无需 Python、无需开启 obs-websocket、无需配置密码**）。
+
+### 1. 安装位置
+
+从 [`obs-plugin/src/hunt-obs-autoclip.dll`](obs-plugin/src/hunt-obs-autoclip.dll)（或 GitHub Releases）下载 `hunt-obs-autoclip.dll`，按你的 OBS 版本选择以下任一位置放入：
+
+- **方式 A（推荐，兼容原版 OBS 与 bililive / 直播姬内嵌改版 OBS）**——直接放进 OBS 安装目录下的插件目录：
+  ```text
+  <OBS安装目录>\obs-plugins\64bit\hunt-obs-autoclip.dll
+  ```
+  > **注意**：bililive 等第三方定制/改版 OBS **不会扫描** `%APPDATA%` 用户级插件目录，必须使用方式 A 放进程序目录的 `obs-plugins\64bit\`。
+- **方式 B（仅限官方原版 OBS Studio 28+）**——放入用户级插件目录：
+  ```text
+  %APPDATA%\obs-studio\plugins\hunt-obs-autoclip\bin\64bit\hunt-obs-autoclip.dll
+  ```
+
+放入后重启 OBS，在顶部菜单栏 **工具（Tools）** 下看到 **`Hunt AutoClip: Status`** 与 **`Hunt AutoClip: Install Shim (non-NVIDIA)...`** 即表示插件加载成功。
+
+> **排障提示（第三方改版 OBS）**：若放入 `obs-plugins\64bit\` 后仍未加载，可用 `dumpbin /exports` 确认 DLL 完整导出 `obs_module_load`、`obs_module_set_pointer`、`obs_module_ver`（本仓库编译的 `hunt-obs-autoclip.dll` 已包含全部必需导出）。
+
+### 2. NVIDIA 环境与非 N 卡 / 无驱动组件用户的 Shim 安装
+
+- **已安装 NVIDIA App / GeForce Experience 的用户**：请先在 NVIDIA App 设置中**关闭 Highlights**（或停止 NVIDIA 容器服务），避免与本插件争抢同一条命名管道 `\\.\pipe\NvMessageBusBroadcast`。务必**先启动 OBS，再启动游戏**。
+- **非 N 卡（AMD/Intel）或未安装 NVIDIA 附带组件的用户**：游戏内置的 GfeSDK 需要检测到 NVIDIA 签名的 `MessageBus.dll` 及其注册表项才会向管道发送事件。
+  1. 请自行准备官方 NVIDIA 签名的 `MessageBus.dll`（本仓库**不捆绑、不分发**该专有 DLL），将其放在插件同目录或系统 `Downloads`（下载）文件夹中；
+  2. 在 OBS 顶部菜单点击 **工具 → `Hunt AutoClip: Install Shim (non-NVIDIA)...`**；
+  3. 插件会自动校验文件 SHA-256 哈希与 `NVIDIA Corporation` 数字签名，通过 UAC 提权将其安装到 `C:\NvidiaShim\MessageBus.dll` 并写入所需注册表项（自动备份原值）。
+
+### 3. OBS 设置建议与已知限制
+
+- **回放缓冲区**：在 OBS「设置 → 输出 → 回放缓存」中开启回放缓冲区，建议时长 **≥ 35 秒**（前 20 秒 + 15 秒连杀合并窗口）、最大内存 **2048 MB**；编码器建议使用硬件编码 **CQP 20**。修改输出设置后需**重启回放缓冲或重启 OBS** 才会生效。
+- **已知限制**：
+  - 游戏 SDK 上报的击杀事件在协议层不区分猎人与部分特殊 AI，均可能触发保存；
+  - 每次触发保存的时间点为**最后一击后 15 秒**（等待连杀合并窗口关闭）加上 OBS 写盘时间，并非击杀瞬间立刻弹窗落盘。
+
+---
+
+## Python 独立脚本版（前提与使用）
 
 - Windows 10/11，Python 3.12+（仅需运行，不需编译）
 - OBS Studio 28+（obs-websocket 已内置），已启用 WebSocket 服务器并设置密码（工具 → WebSocket 服务器设置）
@@ -75,7 +114,8 @@ python -m venv .venv
 
 ## 已验证 / 已知未知
 
-**已验证**（本仓库测试）：
+**已验证**（本仓库测试与实机对局）：
+- **真实对局出片验证**：已在真实 Hunt: Showdown 1896 对局中捕获 `PLAYER_DOWNED` / `HUNTER_KILLED` 事件并自动触发 OBS 保存回放片段。
 - `tests/selftest.py`（22/22）：黄金协议帧逐帧回放——握手、实例创建、事件注册、对局开关、击杀事件字段（`HUNTER_KILLED / match-1896 / -20000 / +5000`）、配置查询、畸形帧拒绝、连杀合并与节流。
 - `tests/e2e_pipe.py`（7/7）：真实管道服务端 + 真实管道客户端全链路，含 PID 反伪造校验（clientPID 必须等于管道对端进程）。
 
